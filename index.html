@@ -30,7 +30,7 @@ button:active{transform:scale(.985)}
 .choice .k{font-weight:700;color:var(--accent);margin-right:8px}
 .choice.correct{border-color:var(--ok);background:rgba(34,197,94,.12)}
 .choice.wrong{border-color:var(--ng);background:rgba(239,68,68,.12)}
-.choice.dim{opacity:.55}
+.cja{color:#cbd5e1;font-size:14.5px;margin-top:3px}
 .choice:disabled{cursor:default}
 .verdict{font-size:19px;font-weight:800;margin:4px 0}
 .verdict.ok{color:var(--ok)}.verdict.ng{color:var(--ng)}
@@ -146,14 +146,16 @@ function home(){
   <div class="card sm">
     <b>履歴(端末内)</b>: 今回分 ${store.attempts.length} 件
     <div class="btn-row" style="margin-top:8px">
-      <button id="exportBtn">📤 Markdownエクスポート</button>
+      <button id="exportBtn">📤 エクスポート</button>
+      <button id="importBtn">📥 インポート</button>
       <button id="lookupBtn">🔖 後で調べる(${store.lookups.length})</button>
     </div>
     <details><summary>このアプリについて / 同期方法</summary>
       <div class="xs mut" style="margin-top:8px">
-      演習は端末内(localStorage)に即時保存されます。区切りで「Markdownエクスポート」を押し、
+      演習は端末内(localStorage)に即時保存されます。区切りで「エクスポート」を押し、
       出てきたテキストを Claude セッションに貼れば、母艦リポジトリの
       <code>results/log.md</code> / <code>vocab.md</code> に追記コミットできます。
+      別端末や履歴クリア後は「インポート」に <code>log.md</code> 等を貼れば復元（重複は自動スキップ）。
       問題データはビルド時に埋め込み済み（オフライン動作）。
       </div>
     </details>
@@ -169,6 +171,7 @@ function home(){
   });
   document.getElementById("startBtn").onclick=()=>start(mode,cnt);
   document.getElementById("exportBtn").onclick=exportView;
+  document.getElementById("importBtn").onclick=importView;
   document.getElementById("lookupBtn").onclick=lookupView;
 }
 
@@ -230,10 +233,9 @@ function answer(picked){
     const k=b.dataset.k;
     if(k===q.correct) b.classList.add("correct");
     else if(k===picked) b.classList.add("wrong");
-    else b.classList.add("dim");
     const c=q.choices.find(x=>x.k===k);
     b.innerHTML=`<span class="k">${k}${k===q.correct?" ✅":""}</span>`+
-      `<span class="en">${esc(c.en)}</span><div class="ja">→ ${esc(c.ja)}</div>`;
+      `<span class="en">${esc(c.en)}</span><div class="cja">→ ${esc(c.ja)}</div>`;
   });
   const stem=document.getElementById("stem");
   document.getElementById("stemja").classList.remove("hide");
@@ -338,6 +340,68 @@ ${look}
     if(confirm("端末内の今回分の履歴を消去します（インポート済みの過去ログは残ります）。コミット済みか確認しましたか？")){
       store.attempts=[]; store.lookups=[]; store.newVocab=[]; save(store); home();
     }
+  };
+}
+
+// ---- インポート（log.md 互換テーブル / 後で調べる単語 を貼り付け取り込み）----
+function attemptKey(x){ return [x.date,x.id,x.result,x.choice,x.time,x.memo||""].join("|"); }
+
+function parseImport(text){
+  const rows=[], looks=[];
+  for(let raw of text.split(/\r?\n/)){
+    const line=raw.trim();
+    if(line.startsWith("|")){
+      const c=line.replace(/^\|/,"").replace(/\|$/,"").split("|").map(s=>s.trim());
+      if(c.length<6) continue;
+      if(c[0]==="日付" || /^[-:\s]+$/.test(c[0])) continue;   // ヘッダ/区切り
+      if(!/^S\d+-Q\d+$/.test(c[1])) continue;                 // ID 形式チェック
+      rows.push({date:c[0], id:c[1], result:c[2], choice:c[3], time:c[4], memo:c[5]});
+    } else {
+      const m=line.match(/^-\s+(\S+)(?:\s+\((.*)\))?\s*$/);    // "- word (src)"
+      if(m && m[1]!=="(なし)") looks.push({word:m[1], src:(m[2]||"").trim()});
+    }
+  }
+  return {rows, looks};
+}
+
+function importView(){
+  app.innerHTML=`
+  <div class="toolbar"><button id="back" class="sm">← 戻る</button>
+    <span class="sm mut">インポート</span><span></span></div>
+  <div class="card sm">エクスポート出力、または <code>results/log.md</code> の表をそのまま貼り付けて取り込み。
+    既存（インポート済み＋端末内）と重複する行は自動でスキップします。</div>
+  <textarea id="ta" placeholder="| 2026-06-22 | S1-Q2 | ✓ | C | 87s |  |
+…ここに貼り付け…"></textarea>
+  <div class="btn-row">
+    <button class="primary" id="run">📥 取り込む</button>
+  </div>
+  <div class="sm mut" id="res"></div>`;
+  document.getElementById("back").onclick=home;
+  document.getElementById("run").onclick=()=>{
+    const {rows, looks}=parseImport(document.getElementById("ta").value);
+    // 既存キー（インポート済みベースライン＋端末内）
+    const have=new Set(allAttempts().map(attemptKey));
+    let added=0, dup=0;
+    for(const r of rows){
+      const k=attemptKey(r);
+      if(have.has(k)){ dup++; continue; }
+      have.add(k); store.attempts.push(r); added++;
+    }
+    // 後で調べる単語（word+src で重複排除）
+    const lk=new Set(store.lookups.map(x=>x.word+"|"+(x.src||"")));
+    let addedLk=0;
+    for(const l of looks){
+      const key=l.word+"|"+(l.src||"");
+      if(lk.has(key)) continue;
+      lk.add(key); store.lookups.push(l); addedLk++;
+    }
+    save(store);
+    document.getElementById("res").innerHTML=
+      `<div class="card">取り込み完了: 履歴 <b>${added}</b> 件追加 / 重複スキップ ${dup} 件`+
+      `${addedLk?` ・ 単語 ${addedLk} 件追加`:""}<br>`+
+      `<span class="xs">解析行: ${rows.length}（うち有効）</span></div>`+
+      `<div class="btn-row"><button class="primary" id="toHome">ホームへ</button></div>`;
+    const h=document.getElementById("toHome"); if(h) h.onclick=home;
   };
 }
 
